@@ -25,6 +25,8 @@ import crawlercommons.sitemaps.UnknownFormatException;
 
 public class Fetcher {
 
+    private String rootUrl;
+
     private SimpleRobotRules rules;
 
     private URLFilter urlFilter;
@@ -33,8 +35,11 @@ public class Fetcher {
     private SimpleRobotRulesParser robotRulesParser;
     private SiteMapParser sitemapParser;
     private Collection<String> userAgents;
+    private ArrayList<String> sitemapUrls;
 
-    public Fetcher(String userAgent) {
+    public Fetcher(String userAgent, String url) {
+        rootUrl = url;
+
         urlFilter = new BasicURLNormalizer();
         httpClient = HttpClient.newBuilder()
                 .followRedirects(Redirect.NORMAL)
@@ -45,15 +50,27 @@ public class Fetcher {
 
         userAgents = new ArrayList<String>();
         userAgents.add(userAgent);
+
+        sitemapUrls = new ArrayList<String>();
+
+        try {
+            fetch();
+        } catch (IOException | InterruptedException | UnknownFormatException e) {
+            System.out.println("Failed lol");
+        }
     }
 
     public boolean isUrlAllowed(String url) {
         return rules.isAllowed(url);
     }
 
-    public void fetchUrl(String url) throws IOException, InterruptedException, UnknownFormatException {
+    public ArrayList<String> getSitemapUrls() {
+        return sitemapUrls;
+    }
 
-        String filteredUrl = urlFilter.filter(url);
+    public void fetch() throws IOException, InterruptedException, UnknownFormatException {
+
+        String filteredUrl = urlFilter.filter(rootUrl);
         if (filteredUrl == null)
             return; // Ignored
 
@@ -75,7 +92,6 @@ public class Fetcher {
                 rules.addSitemap(sitemapUrl); // Sometimes isn't there
             }
 
-            ArrayList<String> sitemapUrls = new ArrayList<String>();
             for (String mapUrl : rules.getSitemaps()) {
                 String filteredMapUrl = urlFilter.filter(mapUrl);
                 if (filteredMapUrl == null)
@@ -86,19 +102,15 @@ public class Fetcher {
                     continue;
 
                 AbstractSiteMap parsedMap = sitemapParser.parseSiteMap(sitemap.body(), sitemap.uri().toURL());
-                findAllSitemaps(parsedMap, sitemapUrls);
-            }
-
-            for (String u : sitemapUrls) {
-                System.out.println(u);
+                findAllSitemaps(parsedMap);
             }
         }
     }
 
-    private void findAllSitemaps(AbstractSiteMap parsedMap, ArrayList<String> sitemapUrls) {
+    private void findAllSitemaps(AbstractSiteMap parsedMap) {
         if (parsedMap.isIndex()) {
             for (AbstractSiteMap child : ((SiteMapIndex) parsedMap).getSitemaps()) {
-                findAllSitemaps(child, sitemapUrls);
+                findAllSitemaps(child);
             }
         } else {
             for (SiteMapURL u : ((SiteMap) parsedMap).getSiteMapUrls()) {
