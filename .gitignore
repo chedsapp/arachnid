@@ -1,9 +1,14 @@
 .gradle
+**/build/
+!**/src/**/build/
 
-build
+gradle-app.setting
 
-.kotlin
+!gradle-wrapper.jar
 
-crawler/bin
+!gradle-wrapper.properties
 
-common/bin
+.gradletasknamecache
+
+.project
+.classpath
