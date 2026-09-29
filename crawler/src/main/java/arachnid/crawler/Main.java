@@ -1,5 +1,7 @@
 package arachnid.crawler;
 
+import arachnid.crawler.fetch.Fetcher;
+
 public class Main {
 
     public static void main(String[] args) {
