@@ -1,5 +1,7 @@
 package arachnid.crawler.fetch;
 
-public class FetchResult {
+import java.util.ArrayList;
+import crawlercommons.robots.SimpleRobotRules;
 
+public record FetchResult(ArrayList<String> sitemapUrls, SimpleRobotRules rules) {
 }

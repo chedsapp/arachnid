@@ -24,22 +24,14 @@ import java.lang.InterruptedException;
 import crawlercommons.sitemaps.UnknownFormatException;
 
 public class Fetcher {
-
-    private String rootUrl;
-
-    private SimpleRobotRules rules;
-
     private URLFilter urlFilter;
     private HttpClient httpClient;
 
     private SimpleRobotRulesParser robotRulesParser;
     private SiteMapParser sitemapParser;
     private Collection<String> userAgents;
-    private ArrayList<String> sitemapUrls;
 
-    public Fetcher(String userAgent, String url) {
-        rootUrl = url;
-
+    public Fetcher(String userAgent) {
         urlFilter = new BasicURLNormalizer();
         httpClient = HttpClient.newBuilder()
                 .followRedirects(Redirect.NORMAL)
@@ -50,67 +42,75 @@ public class Fetcher {
 
         userAgents = new ArrayList<String>();
         userAgents.add(userAgent);
-
-        sitemapUrls = new ArrayList<String>();
-
-        try {
-            fetch();
-        } catch (IOException | InterruptedException | UnknownFormatException e) {
-            System.out.println("Failed lol");
-        }
     }
 
-    public boolean isUrlAllowed(String url) {
-        return rules.isAllowed(url);
-    }
-
-    public ArrayList<String> getSitemapUrls() {
-        return sitemapUrls;
-    }
-
-    public void fetch() throws IOException, InterruptedException, UnknownFormatException {
+    public FetchResult fetch(String rootUrl) throws FailedFetchException {
 
         String filteredUrl = urlFilter.filter(rootUrl);
         if (filteredUrl == null)
-            return; // Ignored
+            throw new FailedFetchException(); // Ignored
 
         // robots.txt
-        HttpResponse<byte[]> robots = makeRequest(filteredUrl + "robots.txt");
-        System.out.println(robots.statusCode());
-        if (robots.statusCode() == 200) {
-
-            Collection<String> sanitizedRobotNames = SimpleRobotRulesParser.sanitizeRobotNames(userAgents);
-
-            rules = robotRulesParser.parseContent(
-                    robots.uri().toString(),
-                    robots.body(),
-                    "text/plain",
-                    sanitizedRobotNames);
-
-            if (rules.getSitemaps().size() == 0) {
-                String sitemapUrl = robots.uri().toString().replace("robots.txt", "sitemap.xml");
-                rules.addSitemap(sitemapUrl); // Sometimes isn't there
-            }
-
-            for (String mapUrl : rules.getSitemaps()) {
-                String filteredMapUrl = urlFilter.filter(mapUrl);
-                if (filteredMapUrl == null)
-                    continue;
-
-                HttpResponse<byte[]> sitemap = makeRequest(filteredMapUrl);
-                if (sitemap.statusCode() != 200)
-                    continue;
-
-                AbstractSiteMap parsedMap = sitemapParser.parseSiteMap(sitemap.body(), sitemap.uri().toURL());
-                findAllSitemaps(parsedMap);
-            }
+        HttpResponse<byte[]> robots;
+        try {
+            robots = makeRequest(filteredUrl + "robots.txt");
+        } catch (InterruptedException | IOException e) {
+            throw new FailedFetchException();
         }
+
+        System.out.println(robots.statusCode());
+        if (robots.statusCode() != 200)
+            throw new FailedFetchException();
+
+        SimpleRobotRules rules;
+        ArrayList<String> sitemapUrls = new ArrayList<String>();
+
+        Collection<String> sanitizedRobotNames = SimpleRobotRulesParser.sanitizeRobotNames(userAgents);
+
+        rules = robotRulesParser.parseContent(
+                robots.uri().toString(),
+                robots.body(),
+                "text/plain",
+                sanitizedRobotNames);
+
+        if (rules.getSitemaps().size() == 0) {
+            String sitemapUrl = robots.uri().toString().replace("robots.txt", "sitemap.xml");
+            rules.addSitemap(sitemapUrl); // Sometimes isn't there
+        }
+
+        for (String mapUrl : rules.getSitemaps()) {
+            String filteredMapUrl = urlFilter.filter(mapUrl);
+            if (filteredMapUrl == null)
+                continue;
+
+            HttpResponse<byte[]> sitemap;
+
+            try {
+                sitemap = makeRequest(filteredMapUrl);
+            } catch (IOException | InterruptedException e) {
+                continue;
+            }
+
+            if (sitemap.statusCode() != 200)
+                continue;
+
+            AbstractSiteMap parsedMap;
+            try {
+                parsedMap = sitemapParser.parseSiteMap(sitemap.body(), sitemap.uri().toURL());
+            } catch (UnknownFormatException | IOException e) {
+                continue;
+            }
+
+            findAllSitemaps(parsedMap, rules, sitemapUrls);
+        }
+
+        return new FetchResult(sitemapUrls, rules);
     }
 
-    private void findAllSitemaps(AbstractSiteMap parsedMap) {
+    private void findAllSitemaps(AbstractSiteMap parsedMap, SimpleRobotRules rules, ArrayList<String> sitemapUrls) {
         if (parsedMap.isIndex()) {
             for (AbstractSiteMap child : ((SiteMapIndex) parsedMap).getSitemaps()) {
-                findAllSitemaps(child);
+                findAllSitemaps(child, rules, sitemapUrls);
             }
         } else {
             for (SiteMapURL u : ((SiteMap) parsedMap).getSiteMapUrls()) {
