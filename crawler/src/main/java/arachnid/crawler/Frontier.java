@@ -8,6 +8,8 @@ import java.util.Comparator;
 
 import crawlercommons.filters.basic.BasicURLNormalizer;
 
+import java.util.NoSuchElementException;
+
 record CrawlTask(String url, int depth, Instant eligibleAt) {
 }
 
@@ -31,6 +33,10 @@ public class Frontier {
                 .comparing(CrawlTask::eligibleAt)
                 .thenComparing(CrawlTask::depth));
         visited = new ConcurrentHashMap<String, VisitRecord>();
+    }
+
+    public CrawlTask pop() throws NoSuchElementException {
+        return queue.remove();
     }
 
     public boolean offer(String url, int depth, String source) {
