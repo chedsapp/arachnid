@@ -44,19 +44,27 @@ public class Database implements AutoCloseable {
             if (in == null)
                 break;
 
-            byte[] bytes;
-
-            try {
-                bytes = in.readAllBytes();
+            String sql;
+            try (in) {
+                sql = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             } catch (IOException e) {
-                bytes = new byte[] {};
+                // Don't mark a migration as applied if we couldn't even read it
+                throw new SQLException("Could not read migration " + resource, e);
             }
 
-            String sql = new String(bytes, StandardCharsets.UTF_8);
+            // Run each migration in a transaction so a failure can't leave
+            // the schema half-updated
+            conn.setAutoCommit(false);
             try (Statement st = conn.createStatement()) {
                 st.executeUpdate(sql);
                 st.executeUpdate("INSERT INTO schema_version VALUES (" +
                         v + ", datetime('now'))");
+                conn.commit();
+            } catch (SQLException e) {
+                conn.rollback();
+                throw e;
+            } finally {
+                conn.setAutoCommit(true);
             }
         }
     }

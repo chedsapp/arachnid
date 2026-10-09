@@ -14,8 +14,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpClient.Redirect;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpResponse.BodyHandler;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.net.URI;
+import java.time.Duration;
 import java.util.Collection;
 import java.util.ArrayList;
 
@@ -24,17 +26,23 @@ import java.lang.InterruptedException;
 import crawlercommons.sitemaps.UnknownFormatException;
 
 public class Fetcher {
-    private URLFilter urlFilter;
-    private HttpClient httpClient;
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(10);
+    private static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(20);
 
-    private SimpleRobotRulesParser robotRulesParser;
-    private SiteMapParser sitemapParser;
-    private Collection<String> userAgents;
+    private final URLFilter urlFilter;
+    private final HttpClient httpClient;
+
+    private final SimpleRobotRulesParser robotRulesParser;
+    private final SiteMapParser sitemapParser;
+    private final String userAgent;
+    private final Collection<String> userAgents;
 
     public Fetcher(String userAgent) {
+        this.userAgent = userAgent;
         urlFilter = new BasicURLNormalizer();
         httpClient = HttpClient.newBuilder()
                 .followRedirects(Redirect.NORMAL)
+                .connectTimeout(CONNECT_TIMEOUT)
                 .build();
 
         robotRulesParser = new SimpleRobotRulesParser();
@@ -44,38 +52,47 @@ public class Fetcher {
         userAgents.add(userAgent);
     }
 
+    /**
+     * Fetches robots.txt and every sitemap it lists for the site at rootUrl.
+     */
     public FetchResult fetch(String rootUrl) throws FailedFetchException {
 
         String filteredUrl = urlFilter.filter(rootUrl);
         if (filteredUrl == null)
-            throw new FailedFetchException(); // Ignored
+            throw new FailedFetchException("Invalid URL: " + rootUrl);
 
-        // robots.txt
+        // robots.txt always lives at the root of the host, whatever path we
+        // were given
+        URI robotsUri = URI.create(filteredUrl).resolve("/robots.txt");
+
         HttpResponse<byte[]> robots;
         try {
-            robots = makeRequest(filteredUrl + "robots.txt");
-        } catch (InterruptedException | IOException e) {
-            throw new FailedFetchException();
+            robots = makeRequest(robotsUri.toString(), BodyHandlers.ofByteArray());
+        } catch (IOException e) {
+            throw new FailedFetchException("Could not fetch " + robotsUri + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new FailedFetchException("Interrupted fetching " + robotsUri);
         }
 
-        System.out.println(robots.statusCode());
-        if (robots.statusCode() != 200)
-            throw new FailedFetchException();
-
         SimpleRobotRules rules;
+        if (robots.statusCode() == 200) {
+            Collection<String> sanitizedRobotNames = SimpleRobotRulesParser.sanitizeRobotNames(userAgents);
+            rules = robotRulesParser.parseContent(
+                    robots.uri().toString(),
+                    robots.body(),
+                    "text/plain",
+                    sanitizedRobotNames);
+        } else {
+            // e.g. 404 means "no rules, crawl anything", 5xx means "back off".
+            // crawler-commons knows the conventions for each status code.
+            rules = robotRulesParser.failedFetch(robots.statusCode());
+        }
+
         ArrayList<String> sitemapUrls = new ArrayList<String>();
 
-        Collection<String> sanitizedRobotNames = SimpleRobotRulesParser.sanitizeRobotNames(userAgents);
-
-        rules = robotRulesParser.parseContent(
-                robots.uri().toString(),
-                robots.body(),
-                "text/plain",
-                sanitizedRobotNames);
-
         if (rules.getSitemaps().size() == 0) {
-            String sitemapUrl = robots.uri().toString().replace("robots.txt", "sitemap.xml");
-            rules.addSitemap(sitemapUrl); // Sometimes isn't there
+            rules.addSitemap(robots.uri().resolve("/sitemap.xml").toString()); // Sometimes isn't there
         }
 
         for (String mapUrl : rules.getSitemaps()) {
@@ -86,9 +103,13 @@ public class Fetcher {
             HttpResponse<byte[]> sitemap;
 
             try {
-                sitemap = makeRequest(filteredMapUrl);
-            } catch (IOException | InterruptedException e) {
+                sitemap = makeRequest(filteredMapUrl, BodyHandlers.ofByteArray());
+            } catch (IOException e) {
+                System.err.println("Skipping sitemap " + filteredMapUrl + ": " + e.getMessage());
                 continue;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
             }
 
             if (sitemap.statusCode() != 200)
@@ -98,6 +119,7 @@ public class Fetcher {
             try {
                 parsedMap = sitemapParser.parseSiteMap(sitemap.body(), sitemap.uri().toURL());
             } catch (UnknownFormatException | IOException e) {
+                System.err.println("Could not parse sitemap " + filteredMapUrl + ": " + e.getMessage());
                 continue;
             }
 
@@ -105,6 +127,35 @@ public class Fetcher {
         }
 
         return new FetchResult(sitemapUrls, rules);
+    }
+
+    /**
+     * Fetches a single page. Throws if the request fails or the server doesn't
+     * answer with 200 OK.
+     */
+    public PageResult fetchPage(String url) throws FailedFetchException {
+        HttpResponse<String> response;
+        try {
+            response = makeRequest(url, BodyHandlers.ofString());
+        } catch (IllegalArgumentException e) {
+            throw new FailedFetchException("Invalid URL: " + url);
+        } catch (IOException e) {
+            throw new FailedFetchException("Could not fetch " + url + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new FailedFetchException("Interrupted fetching " + url);
+        }
+
+        if (response.statusCode() != 200)
+            throw new FailedFetchException("HTTP " + response.statusCode() + " for " + url);
+
+        return new PageResult(
+                response.uri().toString(),
+                response.statusCode(),
+                response.headers().firstValue("Content-Type").orElse(null),
+                response.body(),
+                response.headers().firstValue("ETag").orElse(null),
+                response.headers().firstValue("Last-Modified").orElse(null));
     }
 
     private void findAllSitemaps(AbstractSiteMap parsedMap, SimpleRobotRules rules, ArrayList<String> sitemapUrls) {
@@ -122,14 +173,15 @@ public class Fetcher {
 
     }
 
-    private HttpResponse<byte[]> makeRequest(String url) throws IOException, InterruptedException {
+    private <T> HttpResponse<T> makeRequest(String url, BodyHandler<T> bodyHandler)
+            throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(url))
+                .header("User-Agent", userAgent)
+                .timeout(REQUEST_TIMEOUT)
                 .build();
 
-        HttpResponse<byte[]> response = httpClient.send(request, BodyHandlers.ofByteArray());
-
-        return response;
+        return httpClient.send(request, bodyHandler);
     }
 
 }
